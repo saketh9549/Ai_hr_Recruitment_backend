@@ -12,3 +12,9 @@ aiosqlite
 alembic
 python-dotenv
 email-validator
+
+sentence-transformers
+chromadb
+pdfplumber
+python-docx
+openai
