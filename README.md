@@ -184,14 +184,3 @@ backend/
 └── Dockerfile
 ```
 
-## Frontend Integration
-
-The frontend (React + Vite) expects:
-
-- Backend at `http://localhost:8000`
-- All API routes prefixed with `/api/v1`
-- JWT sent as `Authorization: Bearer <token>` header
-- Login response shape: `{ token: string, user: { id, email, full_name, role } }`
-- On 401 response, frontend clears localStorage and redirects to `/login`
-
-Ensure your frontend's environment variable (e.g., `VITE_API_URL`) is set to `http://localhost:8000/api/v1`.
