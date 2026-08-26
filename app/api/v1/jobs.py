@@ -1,45 +1,39 @@
-from fastapi import APIRouter
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from app.db.session import get_db
+from app.models.job import Job
+from app.schemas.job import JobResponse
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
 
-@router.get("")
-async def list_jobs():
-    return [
-        {
-            "id": 1,
-            "title": "Senior Backend Engineer",
-            "department": "Engineering",
-            "location": "Remote",
-            "type": "full_time",
-            "status": "open",
-            "description": "We are looking for a senior backend engineer...",
-            "posted_at": "2024-01-05T09:00:00Z",
-        },
-        {
-            "id": 2,
-            "title": "Product Designer",
-            "department": "Design",
-            "location": "New York, NY",
-            "type": "full_time",
-            "status": "open",
-            "description": "Join our design team...",
-            "posted_at": "2024-01-08T11:00:00Z",
-        },
-    ]
+@router.get("", response_model=List[JobResponse])
+async def list_jobs(
+    status: Optional[str] = Query(None, description="Filter by job status (e.g. open, closed, draft)"),
+    department: Optional[str] = Query(None, description="Filter by department"),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(Job)
+    if status:
+        stmt = stmt.where(Job.status == status)
+    else:
+        stmt = stmt.where(Job.status == "open")
+    if department:
+        stmt = stmt.where(Job.department == department)
+    
+    stmt = stmt.order_by(Job.created_at.desc())
+    result = await db.execute(stmt)
+    jobs = result.scalars().all()
+    return jobs
 
 
-@router.get("/{id}")
-async def get_job(id: int):
-    return {
-        "id": id,
-        "title": "Senior Backend Engineer",
-        "department": "Engineering",
-        "location": "Remote",
-        "type": "full_time",
-        "status": "open",
-        "description": "We are looking for a senior backend engineer...",
-        "requirements": ["5+ years Python", "FastAPI or Django", "SQL databases"],
-        "salary_range": {"min": 120000, "max": 180000, "currency": "USD"},
-        "posted_at": "2024-01-05T09:00:00Z",
-    }
+@router.get("/{id}", response_model=JobResponse)
+async def get_job(id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Job).where(Job.id == id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job
