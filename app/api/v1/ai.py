@@ -148,55 +148,106 @@ async def get_match(
 # ============================================================
 # 4. JOB RECOMMENDATIONS FOR CANDIDATE
 # ============================================================
-
 @router.get("/recommendations/jobs/{candidateId}")
 async def recommend_jobs(
     candidateId: int,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    return [
-        {
-            "job_id": 1,
-            "title": "Senior Backend Engineer",
-            "company": "TechCorp",
-            "match_score": 92,
-            "reason": "Strong alignment with Python and API development experience",
-        },
-        {
-            "job_id": 3,
-            "title": "Staff Engineer",
-            "company": "StartupX",
-            "match_score": 78,
-            "reason": "Good skills overlap, slight experience gap",
-        },
-    ]
+    resume_result = await db.execute(
+        select(Resume)
+        .where(Resume.candidate_id == candidateId)
+        .order_by(Resume.uploaded_at.desc())
+    )
+    resume_row = resume_result.scalars().first()
+
+    if resume_row is None or not resume_row.extracted_text:
+        return []
+
+    candidate_skills = _extract_skills(resume_row.extracted_text)
+    candidate_experience = _extract_experience_years(resume_row.extracted_text)
+
+    jobs_result = await db.execute(select(Job).where(Job.status == "open"))
+    jobs = jobs_result.scalars().all()
+
+    recommendations = []
+    for job in jobs:
+        required_skills = [s.strip() for s in (job.required_skills or "").split(",") if s.strip()]
+        match = compute_match(
+            candidate_id=candidateId,
+            job_id=job.id,
+            resume_skills=candidate_skills,
+            resume_redacted_text=resume_row.extracted_text,
+            job_required_skills=required_skills,
+            job_description_text=job.description,
+            candidate_experience_years=candidate_experience,
+            job_min_experience_years=job.min_experience_years,
+            candidate_has_required_education=True,
+        )
+        recommendations.append({
+            "job_id": job.id,
+            "title": job.title,
+            "company": job.department or "N/A",
+            "match_score": match.match_score,
+            "reason": match.summary,
+        })
+
+    recommendations.sort(key=lambda r: r["match_score"], reverse=True)
+    return recommendations
 
 
 # ============================================================
 # 5. CANDIDATE RECOMMENDATIONS FOR JOB
 # ============================================================
-
 @router.get("/recommendations/candidates/{jobId}")
 async def recommend_candidates(
     jobId: int,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    return [
-        {
-            "candidate_id": 1,
-            "full_name": "Jane Smith",
-            "match_score": 92,
-            "top_skills": ["Python", "FastAPI", "AWS"],
-            "experience_years": 6,
-        },
-        {
-            "candidate_id": 2,
-            "full_name": "John Doe",
-            "match_score": 78,
-            "top_skills": ["Python", "Django", "Docker"],
-            "experience_years": 4,
-        },
-    ]
+    job_result = await db.execute(select(Job).where(Job.id == jobId))
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    required_skills = [s.strip() for s in (job.required_skills or "").split(",") if s.strip()]
+
+    resumes_result = await db.execute(
+        select(Resume).where(Resume.extracted_text.isnot(None))
+    )
+    resumes = resumes_result.scalars().all()
+
+    recommendations = []
+    for resume_row in resumes:
+        candidate_skills = _extract_skills(resume_row.extracted_text)
+        candidate_experience = _extract_experience_years(resume_row.extracted_text)
+
+        match = compute_match(
+            candidate_id=resume_row.candidate_id,
+            job_id=jobId,
+            resume_skills=candidate_skills,
+            resume_redacted_text=resume_row.extracted_text,
+            job_required_skills=required_skills,
+            job_description_text=job.description,
+            candidate_experience_years=candidate_experience,
+            job_min_experience_years=job.min_experience_years,
+            candidate_has_required_education=True,
+        )
+
+        user_result = await db.execute(select(User).where(User.id == resume_row.candidate_id))
+        candidate_user = user_result.scalar_one_or_none()
+        full_name = candidate_user.full_name if candidate_user else "Unknown"
+
+        recommendations.append({
+            "candidate_id": resume_row.candidate_id,
+            "full_name": full_name,
+            "match_score": match.match_score,
+            "top_skills": candidate_skills[:3],
+            "experience_years": candidate_experience or 0,
+        })
+
+    recommendations.sort(key=lambda r: r["match_score"], reverse=True)
+    return recommendations
 
 
 # ============================================================
@@ -227,21 +278,55 @@ async def get_skill_gap(
 # ============================================================
 # 7. RANK CANDIDATES
 # ============================================================
-
 @router.get("/rank-candidates/{jobId}")
 async def rank_candidates(
     jobId: int,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    return {
-        "job_id": jobId,
-        "ranked_candidates": [
-            {"rank": 1, "candidate_id": 1, "full_name": "Jane Smith", "score": 92},
-            {"rank": 2, "candidate_id": 3, "full_name": "Alice Johnson", "score": 85},
-            {"rank": 3, "candidate_id": 2, "full_name": "John Doe", "score": 78},
-        ],
-    }
+    job_result = await db.execute(select(Job).where(Job.id == jobId))
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
+    required_skills = [s.strip() for s in (job.required_skills or "").split(",") if s.strip()]
+
+    resumes_result = await db.execute(
+        select(Resume).where(Resume.extracted_text.isnot(None))
+    )
+    resumes = resumes_result.scalars().all()
+
+    scored = []
+    for resume_row in resumes:
+        candidate_skills = _extract_skills(resume_row.extracted_text)
+        candidate_experience = _extract_experience_years(resume_row.extracted_text)
+
+        match = compute_match(
+            candidate_id=resume_row.candidate_id,
+            job_id=jobId,
+            resume_skills=candidate_skills,
+            resume_redacted_text=resume_row.extracted_text,
+            job_required_skills=required_skills,
+            job_description_text=job.description,
+            candidate_experience_years=candidate_experience,
+            job_min_experience_years=job.min_experience_years,
+            candidate_has_required_education=True,
+        )
+
+        user_result = await db.execute(select(User).where(User.id == resume_row.candidate_id))
+        candidate_user = user_result.scalar_one_or_none()
+        full_name = candidate_user.full_name if candidate_user else "Unknown"
+
+        scored.append({
+            "candidate_id": resume_row.candidate_id,
+            "full_name": full_name,
+            "score": match.match_score,
+        })
+
+    scored.sort(key=lambda c: c["score"], reverse=True)
+    ranked = [{"rank": i + 1, **c} for i, c in enumerate(scored)]
+
+    return {"job_id": jobId, "ranked_candidates": ranked}
 
 # ============================================================
 # 8. INTERVIEW FEEDBACK
