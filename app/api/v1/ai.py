@@ -6,7 +6,11 @@ from app.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.models.resume import Resume
-from app.ai_integration.resume_parser import parse_resume, load_resume_file_bytes, _extract_skills
+from app.ai_integration.resume_parser import (
+    parse_resume, load_resume_file_bytes, _extract_skills, _extract_experience_years,
+)
+from app.ai_integration.matcher import compute_match
+from app.models.job import Job
 from app.ai_integration.embeddings import embed_text
 from app.ai_integration.vector_client import upsert_resume_embedding
 from app.ai_integration.skill_gap import compute_skill_gap
@@ -103,24 +107,43 @@ async def get_resume_score(
 # ============================================================
 # 3. CANDIDATE ↔ JOB MATCH
 # ============================================================
-
 @router.get("/match/{candidateId}/{jobId}")
 async def get_match(
     candidateId: int,
     jobId: int,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    return {
-        "candidate_id": candidateId,
-        "job_id": jobId,
-        "match_score": 85,
-        "matched_skills": ["Python", "FastAPI", "PostgreSQL"],
-        "missing_skills": ["Kubernetes", "Terraform"],
-        "experience_match": True,
-        "education_match": True,
-        "summary": "Strong match - candidate meets 85% of requirements",
-    }
+    job_result = await db.execute(select(Job).where(Job.id == jobId))
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
+    resume_result = await db.execute(
+        select(Resume)
+        .where(Resume.candidate_id == candidateId)
+        .order_by(Resume.uploaded_at.desc())
+    )
+    resume_row = resume_result.scalars().first()
+
+    if resume_row is None or not resume_row.extracted_text:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No analyzed resume found for this candidate")
+
+    candidate_skills = _extract_skills(resume_row.extracted_text)
+    candidate_experience = _extract_experience_years(resume_row.extracted_text)
+    required_skills = [s.strip() for s in (job.required_skills or "").split(",") if s.strip()]
+
+    return compute_match(
+        candidate_id=candidateId,
+        job_id=jobId,
+        resume_skills=candidate_skills,
+        resume_redacted_text=resume_row.extracted_text,
+        job_required_skills=required_skills,
+        job_description_text=job.description,
+        candidate_experience_years=candidate_experience,
+        job_min_experience_years=job.min_experience_years,
+        candidate_has_required_education=True,
+    )
 
 # ============================================================
 # 4. JOB RECOMMENDATIONS FOR CANDIDATE
