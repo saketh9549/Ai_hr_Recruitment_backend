@@ -11,3 +11,8 @@ dev.db
 *.db
 .env
 .pytest_cache/
+data/
+dev.db
+*.db
+__pycache__/
+check_tables.py
