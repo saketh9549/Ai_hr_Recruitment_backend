@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db.session import engine
 from app.db.base import Base
+from app.models import resume  # noqa: F401 -- ensures Resume table is registered before create_all runs
 from app.api.v1.router import api_router
 
 
